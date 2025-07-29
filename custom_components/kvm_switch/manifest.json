@@ -1,0 +1,11 @@
+{
+  "domain": "kvm_switch",
+  "name": "KVM Switch Controller",
+  "version": "1.0.0",
+  "documentation": "https://github.com/chaosl1996/kvm_switch",
+  "requirements": [],
+  "dependencies": [],
+  "codeowners": ["@chaosl1996"],
+  "config_flow": true,
+  "iot_class": "local_push"
+}
