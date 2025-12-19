@@ -24,6 +24,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     client = KvmClient(hass.loop, host, port)
     await client.connect()
 
+    # 立即获取所有端口的初始状态，确保重启后状态正确
+    _LOGGER.info("🔍 Initializing all port statuses after connection")
+    for port in range(1, DEFAULT_OUTPUT_PORTS + 1):
+        _LOGGER.info(f"📋 Getting initial status for Output {port}")
+        await client.get_current_status(port)
+
     hass.data[DOMAIN][entry.entry_id] = client
 
     # 设置平台
