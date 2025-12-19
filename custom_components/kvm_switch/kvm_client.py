@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from typing import Callable, Dict
+import re
+from typing import Callable, Dict, Optional, Set
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -14,6 +15,17 @@ class KvmClient:
         self.connected = False
         self._callbacks: Dict[str, Callable] = {}
         self._monitor_task: asyncio.Task = None
+        self._read_lock = asyncio.Lock()  # 用于同步读取操作
+        self._status_queue = asyncio.Queue()  # 用于状态获取的响应队列
+        self._waiting_for_status = False  # 标记是否正在等待状态响应
+        
+        # 状态获取命令映射
+        self._status_commands = {
+            1: {"decrease": b'cir 1d\r\n', "increase": b'cir 1e\r\n'},
+            2: {"decrease": b'cir 05\r\n', "increase": b'cir 06\r\n'},
+            3: {"decrease": b'cir 0d\r\n', "increase": b'cir 0e\r\n'},
+            4: {"decrease": b'cir 15\r\n', "increase": b'cir 16\r\n'}
+        }
 
     async def connect(self) -> bool:
         try:
@@ -45,7 +57,13 @@ class KvmClient:
                 if data:
                     response = data.decode().strip()
                     _LOGGER.debug(f"Received from KVM: {response}")
-                    self._handle_response(response)
+                    
+                    # 如果正在等待状态响应，将响应放入队列
+                    if self._waiting_for_status:
+                        await self._status_queue.put(response)
+                    else:
+                        # 否则正常处理响应
+                        self._handle_response(response)
             except asyncio.IncompleteReadError:
                 _LOGGER.warning("Connection closed by KVM switch")
                 self.connected = False
@@ -88,3 +106,88 @@ class KvmClient:
         except Exception as e:
             _LOGGER.error(f"Error sending command: {e}")
             return False
+            
+    async def get_current_status(self, output_port: int) -> int:
+        """
+        获取指定输出端口的当前输入源
+        
+        Args:
+            output_port: 输出端口号 (1-4)
+            
+        Returns:
+            当前输入源编号 (1-4), 如果获取失败返回None
+        """
+        if not self.connected:
+            _LOGGER.error("Not connected to KVM switch")
+            return None
+            
+        if output_port not in self._status_commands:
+            _LOGGER.error(f"Invalid output port: {output_port}")
+            return None
+            
+        commands = self._status_commands[output_port]
+        current_input = None
+        
+        # 使用锁确保同一时间只有一个状态获取操作
+        async with self._read_lock:
+            try:
+                self._waiting_for_status = True
+                
+                # 清空状态队列
+                while not self._status_queue.empty():
+                    try:
+                        await self._status_queue.get()
+                    except:
+                        break
+                        
+                # 发送输入减1命令
+                self.writer.write(commands["decrease"])
+                await self.writer.drain()
+                _LOGGER.debug(f"Sent status check command for Output {output_port}: {commands['decrease'].decode().strip()}")
+                await asyncio.sleep(0.2)
+                
+                # 接收响应 - 从队列中获取
+                response_str = ""
+                start_time = asyncio.get_event_loop().time()
+                while asyncio.get_event_loop().time() - start_time < 2:
+                    try:
+                        # 从队列中获取响应，超时0.5秒
+                        response_line = await asyncio.wait_for(self._status_queue.get(), timeout=0.5)
+                        response_str += response_line + "\n"
+                    except asyncio.TimeoutError:
+                        break
+                        
+                _LOGGER.debug(f"Response for Output {output_port}: {repr(response_str)}")
+                
+                # 解析响应
+                status_lines = re.findall(r's\d+', response_str)
+                
+                for line in status_lines:
+                    if len(line) >= 3:
+                        status_port = int(line[1])
+                        if status_port == output_port:
+                            input_code = int(line[2])
+                            current_input = input_code + 1
+                            _LOGGER.debug(f"Parsed status: Output {status_port} -> Input {current_input}")
+                
+                # 发送输入加1命令恢复原始状态
+                self.writer.write(commands["increase"])
+                await self.writer.drain()
+                _LOGGER.debug(f"Sent restore command for Output {output_port}: {commands['increase'].decode().strip()}")
+                await asyncio.sleep(0.2)
+                
+                # 清空恢复命令的响应
+                await asyncio.sleep(0.1)
+                while not self._status_queue.empty():
+                    try:
+                        await self._status_queue.get()
+                    except:
+                        break
+                        
+            except Exception as e:
+                _LOGGER.error(f"Error getting status for Output {output_port}: {e}")
+                return None
+            finally:
+                self._waiting_for_status = False
+            
+        return current_input

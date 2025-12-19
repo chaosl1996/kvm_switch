@@ -34,6 +34,22 @@ class KvmSelect(SelectEntity):
         # 注册状态更新回调
         self.client.register_callback(str(output_port), self._update_state)
 
+    async def async_added_to_hass(self):
+        """实体添加到Home Assistant时调用"""
+        await super().async_added_to_hass()
+        
+    async def async_update(self):
+        """更新实体状态"""
+        if self._attr_current_option is None:
+            # 只有在状态未知时才获取，避免频繁调用
+            current_input = await self.client.get_current_status(self._output_port)
+            if current_input is not None:
+                # 只更新属性，不调用async_write_ha_state()
+                # 因为在实体初始化阶段调用会导致NoEntitySpecifiedError
+                # Home Assistant会自动处理状态更新
+                self._attr_current_option = f"IN{current_input}"
+                _LOGGER.info(f"Initial state for {self.name}: {self._attr_current_option}")
+
     async def async_select_option(self, option: str):
         # 根据输出口和选择的输入源获取对应的指令
         command_key = f"OUT{self._output_port}_{option}"
